@@ -142,9 +142,10 @@ public sealed class LedgerMemClient : IDisposable
                 resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
                 if (IsRetryableStatus(resp.StatusCode) && attempt < _maxRetries)
                 {
+                    var delayMs = RetryDelayFor(resp, attempt);
                     resp.Dispose();
                     req.Dispose();
-                    await Task.Delay(JitterDelay(attempt), ct).ConfigureAwait(false);
+                    await Task.Delay(delayMs, ct).ConfigureAwait(false);
                     continue;
                 }
                 req.Dispose();
@@ -172,6 +173,8 @@ public sealed class LedgerMemClient : IDisposable
     private static bool IsRetryableStatus(System.Net.HttpStatusCode status)
     {
         var code = (int)status;
+        // 501 Not Implemented is a permanent failure — retrying wastes round-trips.
+        if (code == 501) return false;
         return code == 429 || (code >= 500 && code < 600);
     }
 
@@ -183,6 +186,32 @@ public sealed class LedgerMemClient : IDisposable
         {
             return _jitter.Next(0, capped + 1);
         }
+    }
+
+    /// <summary>
+    /// Honour the server's Retry-After header when present (delta-seconds or
+    /// HTTP-date), otherwise fall back to exponential backoff with jitter.
+    /// The value is capped at <see cref="RetryMaxDelayMs"/> so a hostile or
+    /// misconfigured server cannot stall the client indefinitely.
+    /// </summary>
+    private static int RetryDelayFor(HttpResponseMessage resp, int attempt)
+    {
+        var ra = resp.Headers.RetryAfter;
+        if (ra is not null)
+        {
+            if (ra.Delta is { } delta)
+            {
+                var ms = (int)Math.Min(delta.TotalMilliseconds, RetryMaxDelayMs);
+                return Math.Max(0, ms);
+            }
+            if (ra.Date is { } date)
+            {
+                var deltaMs = (date - DateTimeOffset.UtcNow).TotalMilliseconds;
+                if (deltaMs <= 0) return 0;
+                return (int)Math.Min(deltaMs, RetryMaxDelayMs);
+            }
+        }
+        return JitterDelay(attempt);
     }
 
     private HttpRequestMessage BuildRequest(HttpMethod method, string path)
