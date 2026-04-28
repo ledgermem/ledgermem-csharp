@@ -11,6 +11,10 @@ public sealed class LedgerMemClient : IDisposable
 
     private readonly HttpClient _http;
     private readonly bool _ownsHttpClient;
+    private readonly Uri _baseUri;
+    private readonly string _apiKey;
+    private readonly string _workspaceId;
+    private const string SdkUserAgent = "ledgermem-dotnet/0.1.0";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -29,21 +33,26 @@ public sealed class LedgerMemClient : IDisposable
             ?? Environment.GetEnvironmentVariable("LEDGERMEM_API_URL")
             ?? DefaultBaseUrl;
 
+        _apiKey = apiKey;
+        _workspaceId = workspaceId;
+        _baseUri = new Uri(url.TrimEnd('/') + "/");
+
         if (httpClient is null)
         {
-            _http = new HttpClient { BaseAddress = new Uri(url.TrimEnd('/') + "/") };
+            _http = new HttpClient { BaseAddress = _baseUri };
+            _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            _http.DefaultRequestHeaders.Add("x-workspace-id", workspaceId);
+            _http.DefaultRequestHeaders.UserAgent.ParseAdd(SdkUserAgent);
             _ownsHttpClient = true;
         }
         else
         {
+            // Do not mutate a caller-supplied HttpClient: BaseAddress and default
+            // headers may be shared across other consumers. Auth headers are set
+            // per-request instead.
             _http = httpClient;
-            _http.BaseAddress ??= new Uri(url.TrimEnd('/') + "/");
             _ownsHttpClient = false;
         }
-
-        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-        _http.DefaultRequestHeaders.Add("x-workspace-id", workspaceId);
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("ledgermem-dotnet/0.1.0");
     }
 
     public async Task<SearchResponse> SearchAsync(string query, int? limit = null, string? actorId = null, CancellationToken ct = default)
@@ -72,7 +81,8 @@ public sealed class LedgerMemClient : IDisposable
 
     public async Task DeleteAsync(string id, CancellationToken ct = default)
     {
-        using var resp = await _http.DeleteAsync($"v1/memories/{Uri.EscapeDataString(id)}", ct).ConfigureAwait(false);
+        using var req = BuildRequest(HttpMethod.Delete, $"v1/memories/{Uri.EscapeDataString(id)}");
+        using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         await EnsureSuccessAsync(resp, ct).ConfigureAwait(false);
     }
 
@@ -83,7 +93,8 @@ public sealed class LedgerMemClient : IDisposable
         if (cursor is not null) qs["cursor"] = cursor;
         if (actorId is not null) qs["actorId"] = actorId;
         var path = qs.Count == 0 ? "v1/memories" : $"v1/memories?{qs}";
-        using var resp = await _http.GetAsync(path, ct).ConfigureAwait(false);
+        using var req = BuildRequest(HttpMethod.Get, path);
+        using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         await EnsureSuccessAsync(resp, ct).ConfigureAwait(false);
         return (await resp.Content.ReadFromJsonAsync<ListResponse>(JsonOptions, ct).ConfigureAwait(false))!;
     }
@@ -93,13 +104,25 @@ public sealed class LedgerMemClient : IDisposable
 
     private async Task<T> SendAsync<T>(HttpMethod method, string path, object body, CancellationToken ct)
     {
-        using var req = new HttpRequestMessage(method, path)
-        {
-            Content = JsonContent.Create(body, options: JsonOptions),
-        };
+        using var req = BuildRequest(method, path);
+        req.Content = JsonContent.Create(body, options: JsonOptions);
         using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
         await EnsureSuccessAsync(resp, ct).ConfigureAwait(false);
         return (await resp.Content.ReadFromJsonAsync<T>(JsonOptions, ct).ConfigureAwait(false))!;
+    }
+
+    private HttpRequestMessage BuildRequest(HttpMethod method, string path)
+    {
+        // When using a caller-supplied HttpClient with no BaseAddress, build an
+        // absolute URI. Always set per-request auth headers so we never mutate
+        // shared client state.
+        var uri = _http.BaseAddress is null ? new Uri(_baseUri, path) : (Uri?)new Uri(path, UriKind.Relative);
+        var req = new HttpRequestMessage(method, uri);
+        if (_ownsHttpClient) return req;
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+        req.Headers.TryAddWithoutValidation("x-workspace-id", _workspaceId);
+        req.Headers.UserAgent.ParseAdd(SdkUserAgent);
+        return req;
     }
 
     private static async Task EnsureSuccessAsync(HttpResponseMessage resp, CancellationToken ct)
