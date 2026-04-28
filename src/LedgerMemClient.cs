@@ -8,13 +8,19 @@ namespace LedgerMem;
 public sealed class LedgerMemClient : IDisposable
 {
     private const string DefaultBaseUrl = "https://api.proofly.dev";
+    private const int DefaultMaxRetries = 3;
+    private const int RetryBaseDelayMs = 200;
+    private const int RetryMaxDelayMs = 5_000;
 
     private readonly HttpClient _http;
     private readonly bool _ownsHttpClient;
     private readonly Uri _baseUri;
     private readonly string _apiKey;
     private readonly string _workspaceId;
+    private readonly int _maxRetries;
     private const string SdkUserAgent = "ledgermem-dotnet/0.1.0";
+    private static readonly Random _jitter = new();
+    private static readonly object _jitterLock = new();
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -22,7 +28,7 @@ public sealed class LedgerMemClient : IDisposable
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
-    public LedgerMemClient(string apiKey, string workspaceId, string? baseUrl = null, HttpClient? httpClient = null)
+    public LedgerMemClient(string apiKey, string workspaceId, string? baseUrl = null, HttpClient? httpClient = null, int maxRetries = DefaultMaxRetries)
     {
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new ArgumentException("apiKey is required", nameof(apiKey));
@@ -36,6 +42,7 @@ public sealed class LedgerMemClient : IDisposable
         _apiKey = apiKey;
         _workspaceId = workspaceId;
         _baseUri = new Uri(url.TrimEnd('/') + "/");
+        _maxRetries = Math.Max(0, maxRetries);
 
         if (httpClient is null)
         {
@@ -81,8 +88,7 @@ public sealed class LedgerMemClient : IDisposable
 
     public async Task DeleteAsync(string id, CancellationToken ct = default)
     {
-        using var req = BuildRequest(HttpMethod.Delete, $"v1/memories/{Uri.EscapeDataString(id)}");
-        using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+        using var resp = await SendWithRetriesAsync(HttpMethod.Delete, $"v1/memories/{Uri.EscapeDataString(id)}", null, ct).ConfigureAwait(false);
         await EnsureSuccessAsync(resp, ct).ConfigureAwait(false);
     }
 
@@ -93,8 +99,7 @@ public sealed class LedgerMemClient : IDisposable
         if (cursor is not null) qs["cursor"] = cursor;
         if (actorId is not null) qs["actorId"] = actorId;
         var path = qs.Count == 0 ? "v1/memories" : $"v1/memories?{qs}";
-        using var req = BuildRequest(HttpMethod.Get, path);
-        using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+        using var resp = await SendWithRetriesAsync(HttpMethod.Get, path, null, ct).ConfigureAwait(false);
         await EnsureSuccessAsync(resp, ct).ConfigureAwait(false);
         return (await resp.Content.ReadFromJsonAsync<ListResponse>(JsonOptions, ct).ConfigureAwait(false))!;
     }
@@ -104,11 +109,80 @@ public sealed class LedgerMemClient : IDisposable
 
     private async Task<T> SendAsync<T>(HttpMethod method, string path, object body, CancellationToken ct)
     {
-        using var req = BuildRequest(method, path);
-        req.Content = JsonContent.Create(body, options: JsonOptions);
-        using var resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+        using var resp = await SendWithRetriesAsync(method, path, body, ct).ConfigureAwait(false);
         await EnsureSuccessAsync(resp, ct).ConfigureAwait(false);
         return (await resp.Content.ReadFromJsonAsync<T>(JsonOptions, ct).ConfigureAwait(false))!;
+    }
+
+    private async Task<HttpResponseMessage> SendWithRetriesAsync(HttpMethod method, string path, object? body, CancellationToken ct)
+    {
+        // Pre-serialize the body so we can resend it on retry without state
+        // from a disposed HttpRequestMessage leaking between attempts.
+        byte[]? bodyBytes = null;
+        if (body is not null)
+        {
+            bodyBytes = JsonSerializer.SerializeToUtf8Bytes(body, JsonOptions);
+        }
+
+        Exception? lastException = null;
+        for (var attempt = 0; attempt <= _maxRetries; attempt++)
+        {
+            HttpResponseMessage? resp = null;
+            HttpRequestMessage? req = null;
+            try
+            {
+                req = BuildRequest(method, path);
+                if (bodyBytes is not null)
+                {
+                    var content = new ByteArrayContent(bodyBytes);
+                    content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+                    req.Content = content;
+                }
+
+                resp = await _http.SendAsync(req, ct).ConfigureAwait(false);
+                if (IsRetryableStatus(resp.StatusCode) && attempt < _maxRetries)
+                {
+                    resp.Dispose();
+                    req.Dispose();
+                    await Task.Delay(JitterDelay(attempt), ct).ConfigureAwait(false);
+                    continue;
+                }
+                req.Dispose();
+                return resp;
+            }
+            catch (HttpRequestException ex) when (attempt < _maxRetries && !ct.IsCancellationRequested)
+            {
+                lastException = ex;
+                resp?.Dispose();
+                req?.Dispose();
+                await Task.Delay(JitterDelay(attempt), ct).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException ex) when (attempt < _maxRetries && !ct.IsCancellationRequested)
+            {
+                // Timeout (not user cancellation).
+                lastException = ex;
+                resp?.Dispose();
+                req?.Dispose();
+                await Task.Delay(JitterDelay(attempt), ct).ConfigureAwait(false);
+            }
+        }
+        throw lastException ?? new InvalidOperationException("LedgerMem: request failed");
+    }
+
+    private static bool IsRetryableStatus(System.Net.HttpStatusCode status)
+    {
+        var code = (int)status;
+        return code == 429 || (code >= 500 && code < 600);
+    }
+
+    private static int JitterDelay(int attempt)
+    {
+        var capped = Math.Min(RetryBaseDelayMs * (1 << Math.Min(attempt, 20)), RetryMaxDelayMs);
+        // Random is not thread-safe before .NET 6 in all paths; lock to be safe.
+        lock (_jitterLock)
+        {
+            return _jitter.Next(0, capped + 1);
+        }
     }
 
     private HttpRequestMessage BuildRequest(HttpMethod method, string path)
