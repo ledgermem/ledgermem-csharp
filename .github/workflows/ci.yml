@@ -17,6 +17,6 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
-      - run: dotnet restore test/LedgerMem.Tests.csproj
-      - run: dotnet build test/LedgerMem.Tests.csproj --no-restore -c Release
-      - run: dotnet test test/LedgerMem.Tests.csproj --no-build -c Release --verbosity normal
+      - run: dotnet restore test/Mnemo.Tests.csproj
+      - run: dotnet build test/Mnemo.Tests.csproj --no-restore -c Release
+      - run: dotnet test test/Mnemo.Tests.csproj --no-build -c Release --verbosity normal

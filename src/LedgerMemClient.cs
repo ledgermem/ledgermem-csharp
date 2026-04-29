@@ -3,11 +3,11 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Web;
 
-namespace LedgerMem;
+namespace Mnemo;
 
-public sealed class LedgerMemClient : IDisposable
+public sealed class MnemoClient : IDisposable
 {
-    private const string DefaultBaseUrl = "https://api.proofly.dev";
+    private const string DefaultBaseUrl = "https://api.getmnemo.xyz";
     private const int DefaultMaxRetries = 3;
     private const int RetryBaseDelayMs = 200;
     private const int RetryMaxDelayMs = 5_000;
@@ -18,7 +18,7 @@ public sealed class LedgerMemClient : IDisposable
     private readonly string _apiKey;
     private readonly string _workspaceId;
     private readonly int _maxRetries;
-    private const string SdkUserAgent = "ledgermem-dotnet/0.1.0";
+    private const string SdkUserAgent = "getmnemo-dotnet/0.1.0";
     private static readonly Random _jitter = new();
     private static readonly object _jitterLock = new();
 
@@ -28,7 +28,7 @@ public sealed class LedgerMemClient : IDisposable
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
 
-    public LedgerMemClient(string apiKey, string workspaceId, string? baseUrl = null, HttpClient? httpClient = null, int maxRetries = DefaultMaxRetries)
+    public MnemoClient(string apiKey, string workspaceId, string? baseUrl = null, HttpClient? httpClient = null, int maxRetries = DefaultMaxRetries)
     {
         if (string.IsNullOrWhiteSpace(apiKey))
             throw new ArgumentException("apiKey is required", nameof(apiKey));
@@ -36,7 +36,7 @@ public sealed class LedgerMemClient : IDisposable
             throw new ArgumentException("workspaceId is required", nameof(workspaceId));
 
         var url = baseUrl
-            ?? Environment.GetEnvironmentVariable("LEDGERMEM_API_URL")
+            ?? Environment.GetEnvironmentVariable("GETMNEMO_API_URL")
             ?? DefaultBaseUrl;
 
         _apiKey = apiKey;
@@ -167,7 +167,7 @@ public sealed class LedgerMemClient : IDisposable
                 await Task.Delay(JitterDelay(attempt), ct).ConfigureAwait(false);
             }
         }
-        throw lastException ?? new InvalidOperationException("LedgerMem: request failed");
+        throw lastException ?? new InvalidOperationException("Mnemo: request failed");
     }
 
     private static bool IsRetryableStatus(System.Net.HttpStatusCode status)
@@ -232,7 +232,7 @@ public sealed class LedgerMemClient : IDisposable
     {
         if (resp.IsSuccessStatusCode) return;
         var body = await resp.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-        throw new LedgerMemException((int)resp.StatusCode, $"LedgerMem API error {(int)resp.StatusCode}: {body}");
+        throw new MnemoException((int)resp.StatusCode, $"Mnemo API error {(int)resp.StatusCode}: {body}");
     }
 
     public void Dispose()

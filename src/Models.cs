@@ -1,6 +1,6 @@
 using System.Text.Json.Serialization;
 
-namespace LedgerMem;
+namespace Mnemo;
 
 public sealed record Memory(
     [property: JsonPropertyName("id")] string Id,
@@ -25,11 +25,11 @@ public sealed record ListResponse(
     [property: JsonPropertyName("nextCursor")] string? NextCursor
 );
 
-public sealed class LedgerMemException : Exception
+public sealed class MnemoException : Exception
 {
     public int StatusCode { get; }
 
-    public LedgerMemException(int statusCode, string message) : base(message)
+    public MnemoException(int statusCode, string message) : base(message)
     {
         StatusCode = statusCode;
     }

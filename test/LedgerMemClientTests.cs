@@ -4,9 +4,9 @@ using System.Text;
 using System.Text.Json;
 using Xunit;
 
-namespace LedgerMem.Tests;
+namespace Mnemo.Tests;
 
-public class LedgerMemClientTests
+public class MnemoClientTests
 {
     private sealed class StubHandler : HttpMessageHandler
     {
@@ -23,11 +23,11 @@ public class LedgerMemClientTests
         }
     }
 
-    private static (LedgerMemClient client, StubHandler handler) MakeClient(HttpResponseMessage response)
+    private static (MnemoClient client, StubHandler handler) MakeClient(HttpResponseMessage response)
     {
         var handler = new StubHandler { Responder = _ => response };
         var http = new HttpClient(handler) { BaseAddress = new Uri("https://api.test/") };
-        var client = new LedgerMemClient("test-key", "ws_123", baseUrl: "https://api.test", httpClient: http);
+        var client = new MnemoClient("test-key", "ws_123", baseUrl: "https://api.test", httpClient: http);
         return (client, handler);
     }
 
@@ -67,7 +67,7 @@ public class LedgerMemClientTests
     {
         var (client, _) = MakeClient(Json(HttpStatusCode.NotFound, new { error = "not found" }));
 
-        var ex = await Assert.ThrowsAsync<LedgerMemException>(() => client.DeleteAsync("missing"));
+        var ex = await Assert.ThrowsAsync<MnemoException>(() => client.DeleteAsync("missing"));
         Assert.Equal(404, ex.StatusCode);
     }
 }
